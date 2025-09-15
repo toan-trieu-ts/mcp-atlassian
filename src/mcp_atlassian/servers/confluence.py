@@ -1,7 +1,10 @@
 """Confluence FastMCP server instance and tool definitions."""
 
+import base64
+import binascii
 import json
 import logging
+import struct
 from typing import Annotated
 
 from fastmcp import Context, FastMCP
@@ -214,6 +217,156 @@ async def get_page(
     if not page_object:
         return json.dumps(
             {"error": "Page not found with the provided identifiers."},
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    if include_metadata:
+        result = {"metadata": page_object.to_simplified_dict()}
+    else:
+        result = {"content": {"value": page_object.content}}
+
+    return json.dumps(result, indent=2, ensure_ascii=False)
+
+
+@confluence_mcp.tool(tags={"confluence", "read"})
+async def get_page_by_shortlink(
+    ctx: Context,
+    shortlink: Annotated[
+        str,
+        Field(
+            description=(
+                "The Confluence shortlink (tiny URL) containing '/x/', which indicates a shortened URL. "
+                "For example: 'https://example.atlassian.net/wiki/x/CoC0-/' or "
+                "'https://example.atlassian.net/wiki/x/BQC78g'. "
+                "This tool will decode the URL to find the original numeric page ID and retrieve the page content."
+            )
+        ),
+    ],
+    include_metadata: Annotated[
+        bool,
+        Field(
+            description="Whether to include page metadata such as creation date, last update, version, and labels.",
+            default=True,
+        ),
+    ] = True,
+    convert_to_markdown: Annotated[
+        bool,
+        Field(
+            description=(
+                "Whether to convert page to markdown (true) or keep it in raw HTML format (false). "
+                "Raw HTML can reveal macros (like dates) not visible in markdown, but CAUTION: "
+                "using HTML significantly increases token usage in AI responses."
+            ),
+            default=True,
+        ),
+    ] = True,
+) -> str:
+    """Get content of a specific Confluence page using its shortlink (tiny URL).
+
+    This tool extracts the Confluence page ID from a tiny URL containing '/x/' and 
+    retrieves the page content. It's useful when you have a shortened Confluence URL
+    and want to access the full page content.
+
+    Args:
+        ctx: The FastMCP context.
+        shortlink: The Confluence tiny URL containing '/x/'.
+        include_metadata: Whether to include page metadata.
+        convert_to_markdown: Convert content to markdown (true) or keep raw HTML (false).
+
+    Returns:
+        JSON string representing the page content and/or metadata, or an error if the 
+        shortlink is invalid or the page cannot be retrieved.
+    """
+    confluence_fetcher = await get_confluence_fetcher(ctx)
+    
+    # Extract and decode the page ID from the shortlink
+    try:
+        # Extract the encoded part from the URL
+        if "/x/" in shortlink:
+            page_short_id = shortlink.split("/x/")[-1]
+        else:
+            # Assume the input is just the encoded part
+            page_short_id = shortlink.split("/")[-1]
+
+        # Remove any trailing slashes or fragments
+        page_short_id = page_short_id.split("#")[0].split("?")[0].strip("/")
+
+        if not page_short_id:
+            logger.error(
+                f"Empty encoded string extracted from shortlink: {shortlink}"
+            )
+            return json.dumps(
+                {
+                    "error": "Invalid shortlink format: no encoded string found",
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+
+        # Reverse the URL-safe character replacements
+        # Original encoding: / → -, + → _, \n → /
+        # So we reverse: / → \n, - → /, _ → +
+        page_short_id = (
+            page_short_id.replace("/", "\n").replace("-", "/").replace("_", "+")
+        )
+
+        # Restore Base64 padding
+        # Pad to 11 characters with 'A' and add '=' for proper Base64 format
+        padded_id = page_short_id.ljust(11, "A") + "="
+
+        # Base64 decode to get binary data
+        decoded_id = base64.b64decode(padded_id)
+
+        # Unpack binary data as unsigned long to get the original page ID
+        page_id = struct.unpack("L", decoded_id)[0]
+
+        logger.info(
+            f"Successfully decoded shortlink {shortlink} to page ID: {page_id}"
+        )
+
+    except binascii.Error as e:
+        logger.error(f"Base64 decode error for shortlink {shortlink}: {e}")
+        return json.dumps(
+            {
+                "error": f"Invalid Base64 encoding in shortlink: {str(e)}",
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    except struct.error as e:
+        logger.error(f"Struct unpack error for shortlink {shortlink}: {e}")
+        return json.dumps(
+            {
+                "error": f"Invalid binary data format in shortlink: {str(e)}",
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error decoding shortlink {shortlink}: {e}")
+        return json.dumps(
+            {"error": f"Failed to decode shortlink: {str(e)}"},
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    # Now retrieve the page content using the decoded page ID
+    try:
+        page_object = confluence_fetcher.get_page_content(
+            str(page_id), convert_to_markdown=convert_to_markdown
+        )
+    except Exception as e:
+        logger.error(f"Error fetching page by ID '{page_id}' from shortlink '{shortlink}': {e}")
+        return json.dumps(
+            {"error": f"Failed to retrieve page by ID '{page_id}': {e}"},
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    if not page_object:
+        return json.dumps(
+            {"error": f"Page with ID '{page_id}' not found."},
             indent=2,
             ensure_ascii=False,
         )

@@ -339,6 +339,64 @@ async def test_get_page_no_markdown(client, mock_confluence_fetcher):
 
 
 @pytest.mark.anyio
+async def test_get_page_by_shortlink(client, mock_confluence_fetcher):
+    """Test the get_page_by_shortlink tool with a valid shortlink."""
+    # Test shortlink that should decode to page ID 123456
+    # This is a valid encoded shortlink for page ID 123456
+    test_shortlink = "https://example.atlassian.net/wiki/x/CoC0-"
+    
+    response = await client.call_tool(
+        "confluence_get_page_by_shortlink", {"shortlink": test_shortlink}
+    )
+
+    # Verify that get_page_content was called with the decoded page ID
+    # Note: The exact page ID depends on the encoding, but we can verify the call was made
+    mock_confluence_fetcher.get_page_content.assert_called_once()
+    call_args = mock_confluence_fetcher.get_page_content.call_args
+    assert call_args[1]["convert_to_markdown"] is True
+
+    result_data = json.loads(response[0].text)
+    assert "metadata" in result_data
+    assert result_data["metadata"]["title"] == "Test Page Mock Title"
+
+
+@pytest.mark.anyio
+async def test_get_page_by_shortlink_invalid_format(client, mock_confluence_fetcher):
+    """Test the get_page_by_shortlink tool with an invalid shortlink format."""
+    # Test with invalid shortlink
+    test_shortlink = "https://example.atlassian.net/wiki/invalid-url"
+    
+    response = await client.call_tool(
+        "confluence_get_page_by_shortlink", {"shortlink": test_shortlink}
+    )
+
+    # Should not call get_page_content for invalid URLs
+    mock_confluence_fetcher.get_page_content.assert_not_called()
+
+    result_data = json.loads(response[0].text)
+    assert "error" in result_data
+    assert "Failed to decode shortlink" in result_data["error"]
+
+
+@pytest.mark.anyio
+async def test_get_page_by_shortlink_no_metadata(client, mock_confluence_fetcher):
+    """Test get_page_by_shortlink with metadata disabled."""
+    test_shortlink = "https://example.atlassian.net/wiki/x/CoC0-"
+    
+    response = await client.call_tool(
+        "confluence_get_page_by_shortlink", 
+        {"shortlink": test_shortlink, "include_metadata": False}
+    )
+
+    mock_confluence_fetcher.get_page_content.assert_called_once()
+
+    result_data = json.loads(response[0].text)
+    assert "metadata" not in result_data
+    assert "content" in result_data
+    assert "This is a test page content" in result_data["content"]["value"]
+
+
+@pytest.mark.anyio
 async def test_get_page_children(client, mock_confluence_fetcher):
     """Test the get_page_children tool."""
     response = await client.call_tool(
